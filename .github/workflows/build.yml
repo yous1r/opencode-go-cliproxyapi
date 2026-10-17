@@ -143,7 +143,15 @@ jobs:
           }
           EOF
           gcc -O0 -o dlopen-smoke dlopen-smoke.c -ldl
-          qemu-x86_64 -cpu Nehalem ./dlopen-smoke "dist/${LIB_NAME}"
+          echo "--- qemu CPU model ---" | tee -a "$GITHUB_STEP_SUMMARY"
+          qemu-x86_64 -cpu Nehalem -version 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          echo "--- dlopen smoke output ---" | tee -a "$GITHUB_STEP_SUMMARY"
+          set +e
+          qemu-x86_64 -strace -cpu Nehalem ./dlopen-smoke "dist/${LIB_NAME}" > smoke.log 2>&1
+          smoke_rc=$?
+          set -e
+          cat smoke.log | tee -a "$GITHUB_STEP_SUMMARY"
+          exit $smoke_rc
 
       - name: Build shared library
         if: matrix.goos != 'linux' || matrix.goarch != 'amd64'
