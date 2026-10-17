@@ -175,6 +175,23 @@ jobs:
             -library "dist/${LIB_NAME}" \
             -archive "${ARCHIVE_NAME}" \
             -checksum "${ARCHIVE_NAME}.sha256"
+      - name: Publish artifact branch (linux/amd64)
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/artifact-branch"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git clone --depth 1 --branch build-artifacts \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$work"
+          cp "${ARCHIVE_NAME}" "$work/${ARCHIVE_NAME}"
+          cp "${ARCHIVE_NAME}.sha256" "$work/${ARCHIVE_NAME}.sha256"
+          git -C "$work" add "${ARCHIVE_NAME}" "${ARCHIVE_NAME}.sha256"
+          git -C "$work" commit -m "build: ${GITHUB_SHA} ${ARCHIVE_NAME}"
+          git -C "$work" push origin HEAD:build-artifacts
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
         with:
