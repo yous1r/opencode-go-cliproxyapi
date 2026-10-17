@@ -113,7 +113,7 @@ jobs:
           check_no_vex crosscall2
           echo "no AVX/VEX instructions in x_cgo_sigaction / crosscall2"
 
-      - name: Smoke test dlopen with AVX disabled (qemu AVX-off)
+      - name: Smoke test dlopen on baseline x86-64 CPU (qemu qemu64)
         if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
         run: |
           set -euo pipefail
@@ -153,17 +153,17 @@ jobs:
           EOF
           gcc -O0 -o avx-detect avx-detect.c
           gcc -O0 -o dlopen-smoke dlopen-smoke.c -ldl
-          avx_state=$(qemu-x86_64 -cpu max,avx=off,avx2=off ./avx-detect)
-          echo "AVX-disabled cpu flags: ${avx_state}" | tee -a "$GITHUB_STEP_SUMMARY"
+          avx_state=$(qemu-x86_64 -cpu qemu64 ./avx-detect)
+          echo "qemu64 cpu flags: ${avx_state}" | tee -a "$GITHUB_STEP_SUMMARY"
           echo "${avx_state}" | grep -q 'avx=0 avx2=0' || {
-            echo "qemu AVX-off profile reports unexpected AVX support; smoke test cannot prove the fix" >&2
+            echo "qemu64 reports unexpected AVX support; smoke test cannot prove the fix" >&2
             exit 1
           }
           echo "--- qemu CPU model ---" | tee -a "$GITHUB_STEP_SUMMARY"
-          qemu-x86_64 -cpu max,avx=off,avx2=off -version 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          qemu-x86_64 -cpu qemu64 -version 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
           echo "--- dlopen smoke output ---" | tee -a "$GITHUB_STEP_SUMMARY"
           set +e
-          qemu-x86_64 -strace -cpu max,avx=off,avx2=off ./dlopen-smoke "dist/${LIB_NAME}" > smoke.log 2>&1
+          qemu-x86_64 -strace -cpu qemu64 ./dlopen-smoke "dist/${LIB_NAME}" > smoke.log 2>&1
           smoke_rc=$?
           set -e
           cat smoke.log | tee -a "$GITHUB_STEP_SUMMARY"
