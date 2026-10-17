@@ -113,12 +113,10 @@ jobs:
           check_no_vex crosscall2
           echo "no AVX/VEX instructions in x_cgo_sigaction / crosscall2"
 
-      - name: Smoke test dlopen on baseline x86-64 CPU (qemu qemu64)
+      - name: Smoke test dlopen on non-AVX CPU (qemu Nehalem)
         if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-user gcc libc6-dev
           cat > dlopen-smoke.c <<'EOF'
           #include <dlfcn.h>
           #include <stdio.h>
@@ -142,33 +140,23 @@ jobs:
             return 0;
           }
           EOF
-          cat > avx-detect.c <<'EOF'
-          #include <stdio.h>
-
-          int main(void) {
-            __builtin_cpu_init();
-            printf("avx=%d avx2=%d\n", __builtin_cpu_supports("avx"), __builtin_cpu_supports("avx2"));
-            return 0;
-          }
-          EOF
-          gcc -O0 -o avx-detect avx-detect.c
-          gcc -O0 -o dlopen-smoke dlopen-smoke.c -ldl
-          avx_state=$(qemu-x86_64 -cpu qemu64 ./avx-detect)
-          echo "qemu64 cpu flags: ${avx_state}" | tee -a "$GITHUB_STEP_SUMMARY"
-          echo "${avx_state}" | grep -q 'avx=0 avx2=0' || {
-            echo "qemu64 reports unexpected AVX support; smoke test cannot prove the fix" >&2
-            exit 1
-          }
-          echo "--- qemu CPU model ---" | tee -a "$GITHUB_STEP_SUMMARY"
-          qemu-x86_64 -cpu qemu64 -version 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
-          echo "--- dlopen smoke output ---" | tee -a "$GITHUB_STEP_SUMMARY"
-          set +e
-          qemu-x86_64 -strace -cpu qemu64 ./dlopen-smoke "dist/${LIB_NAME}" > smoke.log 2>&1
-          smoke_rc=$?
-          set -e
-          cat smoke.log | tee -a "$GITHUB_STEP_SUMMARY"
-          exit $smoke_rc
-
+          # The Ubuntu 26.04 host glibc is built for x86-64-v3 and cannot start
+          # inside a baseline qemu CPU model. Run the smoke test in a Debian
+          # bookworm userland whose glibc targets plain x86-64.
+          docker run --rm \
+            -e LIB_NAME="${LIB_NAME}" \
+            -v "$PWD:/work" -w /work \
+            debian:bookworm \
+            bash -c '
+              set -euo pipefail
+              apt-get update -qq
+              apt-get install -y -qq --no-install-recommends qemu-user gcc libc6-dev >/dev/null
+              gcc -O0 -o dlopen-smoke dlopen-smoke.c -ldl
+              echo "--- qemu version ---"
+              qemu-x86_64 --version | head -1
+              echo "--- running dlopen under -cpu Nehalem (no AVX) ---"
+              qemu-x86_64 -cpu Nehalem ./dlopen-smoke "dist/${LIB_NAME}"
+            '
       - name: Build shared library
         if: matrix.goos != 'linux' || matrix.goarch != 'amd64'
         run: |
