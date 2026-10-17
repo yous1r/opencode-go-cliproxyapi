@@ -3,6 +3,9 @@ name: Build
 on:
   pull_request:
   push:
+    branches:
+      - main
+      - 'pi/**'
     tags:
       - 'v*'
   workflow_dispatch:
@@ -42,6 +45,9 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Test
+        run: go test ./...
+
       - name: Resolve release metadata
         run: |
           set -euo pipefail
@@ -54,7 +60,93 @@ jobs:
           echo "LIB_NAME=${PLUGIN_ID}.${{ matrix.ext }}" >> "${GITHUB_ENV}"
           echo "ARCHIVE_NAME=${PLUGIN_ID}_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.zip" >> "${GITHUB_ENV}"
 
+      - name: Build shared library (linux/amd64 baseline ISA)
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          CGO_ENABLED=1 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} GOAMD64=v1 \
+          CGO_CFLAGS="-O2 -march=x86-64 -mtune=generic -mno-avx -mno-avx2" \
+          CGO_CXXFLAGS="-O2 -march=x86-64 -mtune=generic -mno-avx -mno-avx2" \
+            go build -trimpath -buildmode=c-shared \
+              -ldflags "-s -w" \
+              -o "dist/${LIB_NAME}" .
+          rm -f "dist/${PLUGIN_ID}.h"
+
+      - name: Verify linux/amd64 baseline ISA (no AVX)
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        run: |
+          set -euo pipefail
+          lib="dist/${LIB_NAME}"
+          echo "--- go build settings ---"
+          go version -m "$lib"
+          go version -m "$lib" | grep -Eq '^[[:space:]]+build[[:space:]]+GOAMD64=v1$' || {
+            echo "GOAMD64=v1 missing from build info" >&2
+            exit 1
+          }
+
+          # The plugin is linked with -s -w, so objdump's --disassemble=SYMBOL
+          # would run past the stripped symbol boundary. Use the ELF symbol
+          # size instead so only the real function body is inspected.
+          check_no_vex() {
+            local sym="$1"
+            local value size start stop
+            value=$(readelf -sW "$lib" | awk -v s="$sym" '$8==s {print $2; exit}')
+            size=$(readelf -sW "$lib" | awk -v s="$sym" '$8==s {print $3; exit}')
+            if [ -z "$value" ] || [ -z "$size" ]; then
+              echo "symbol $sym not found in $lib" >&2
+              return 1
+            fi
+            start=$((0x$value))
+            stop=$((start + size))
+            echo "--- $sym: 0x$(printf '%x' "$start")..0x$(printf '%x' "$stop") ---"
+            objdump -d --start-address="$start" --stop-address="$stop" "$lib" > "$sym.asm"
+            # Instruction column is the third tab-separated field; encoding
+            # column is the second. VEX prefixes are C4/C5, AVX mnemonics v*.
+            if awk -F'\t' 'NF>=3 && ($2 ~ /^[[:space:]]*c[45][[:space:]]/ || $3 ~ /^v[a-z0-9]/) {print; bad=1} END {exit !bad}' "$sym.asm"; then
+              echo "AVX/VEX instructions found in $sym" >&2
+              return 1
+            fi
+          }
+
+          check_no_vex x_cgo_sigaction
+          check_no_vex crosscall2
+          echo "no AVX/VEX instructions in x_cgo_sigaction / crosscall2"
+
+      - name: Smoke test dlopen on non-AVX CPU (qemu Nehalem)
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-user gcc libc6-dev
+          cat > dlopen-smoke.c <<'EOF'
+          #include <dlfcn.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+
+          int main(int argc, char **argv) {
+            if (argc != 2) {
+              fprintf(stderr, "usage: %s <plugin.so>\n", argv[0]);
+              return 2;
+            }
+            void *handle = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
+            if (handle == NULL) {
+              fprintf(stderr, "dlopen failed: %s\n", dlerror());
+              return 1;
+            }
+            if (dlsym(handle, "cliproxy_plugin_init") == NULL) {
+              fprintf(stderr, "missing cliproxy_plugin_init\n");
+              return 1;
+            }
+            printf("dlopen OK (no SIGILL)\n");
+            return 0;
+          }
+          EOF
+          gcc -O0 -o dlopen-smoke dlopen-smoke.c -ldl
+          qemu-x86_64 -cpu Nehalem ./dlopen-smoke "dist/${LIB_NAME}"
+
       - name: Build shared library
+        if: matrix.goos != 'linux' || matrix.goarch != 'amd64'
         run: |
           set -euo pipefail
           mkdir -p dist
@@ -71,7 +163,6 @@ jobs:
             -library "dist/${LIB_NAME}" \
             -archive "${ARCHIVE_NAME}" \
             -checksum "${ARCHIVE_NAME}.sha256"
-
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
         with:
